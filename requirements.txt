@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+PyPDF2
+easyocr
+transformers
+torch
+sentencepiece
+playwright
+pydantic
