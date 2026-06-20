@@ -34,9 +34,19 @@ from pydantic import BaseModel
 
 from . import ai_utils, resume_utils, ocr_utils, form_filler
 
-# The location of the profile JSON file. Modify this if you want to
-# persist profiles elsewhere.
-PROFILE_PATH = Path(__file__).resolve().parent / "profile.json"
+# The location of the profile JSON file.
+#
+# IMPORTANT: this used to live inside the app's source directory
+# (Path(__file__).parent), but Render's deployed code directory is
+# read-only at runtime. Writing there throws an OSError/PermissionError
+# that was uncaught, which is what produced the 500 with no detail.
+#
+# tempfile.gettempdir() is guaranteed writable on Render (and most hosts).
+# Trade-off: this directory is ephemeral -- it can be wiped on restart or
+# redeploy. This is NOT permanent storage. If you need the profile to
+# survive restarts, attach a Render Persistent Disk and point this at a
+# path on that disk instead, or move to a real database.
+PROFILE_PATH = Path(tempfile.gettempdir()) / "copilot_profile.json"
 
 
 class Profile(BaseModel):
@@ -102,14 +112,20 @@ app = FastAPI(title="AI Job Application Copilot",
 def load_profile() -> Profile:
     """Load the user profile from disk or return an empty profile."""
     if PROFILE_PATH.exists():
-        data = json.loads(PROFILE_PATH.read_text())
-        return Profile(**data)
+        try:
+            data = json.loads(PROFILE_PATH.read_text())
+            return Profile(**data)
+        except (json.JSONDecodeError, OSError) as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read profile: {e}")
     return Profile()
 
 
 def save_profile(profile: Profile) -> None:
     """Persist the profile to disk."""
-    PROFILE_PATH.write_text(profile.json(indent=2))
+    try:
+        PROFILE_PATH.write_text(profile.json(indent=2))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write profile: {e}")
 
 
 @app.get("/profile", response_model=Profile)
