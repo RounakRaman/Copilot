@@ -24,13 +24,13 @@ from transformers import pipeline
 # performing it once avoids repeated overhead. Choose modest models that
 # balance quality with inference speed on CPU.
 try:
-    summariser = pipeline("text-generation", model="facebook/bart-large-cnn", tokenizer="facebook/bart-large-cnn")
+    summariser = pipeline("text-generation", model="facebook/bart-large-cnn")
 except Exception as e:
     logging.warning("Failed to load summariser: %s", e)
     summariser = None
 
 try:
-    generator = pipeline("text-generation", model="google/flan-t5-base", tokenizer="google/flan-t5-base")
+    generator = pipeline("text-generation", model="google/flan-t5-base")
 except Exception as e:
     logging.warning("Failed to load generator: %s", e)
     generator = None
