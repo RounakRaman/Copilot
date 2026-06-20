@@ -238,8 +238,12 @@ async def autofill_job_application(url: str = Form(...),
     elif profile.github:
         resume_file_path = Path(profile.github)
 
-    # Invoke the automation. This will return a dictionary of filled fields.
-    fill_report = form_filler.fill_form(
+    # Invoke the automation directly as an async call. We must `await`
+    # this rather than call a sync wrapper, because this endpoint already
+    # runs on uvicorn's event loop -- trying to start a second event loop
+    # here (which the old form_filler.fill_form() did) raises
+    # "Cannot run the event loop while another loop is running".
+    fill_report = await form_filler._fill_form_async(
         url=url,
         profile=profile.dict(),
         resume_path=resume_file_path,
