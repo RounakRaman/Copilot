@@ -2,8 +2,6 @@ fastapi
 uvicorn
 PyPDF2
 easyocr
-transformers
-torch
-sentencepiece
+requests
 playwright
 pydantic
