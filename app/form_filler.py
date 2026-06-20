@@ -27,6 +27,133 @@ from . import ai_utils
 # Playwright installed. When the fill_form function is invoked the import
 # will occur; if Playwright is unavailable a descriptive error is raised.
 
+async def _fill_google_form(page, profile: Dict[str, str], job_description: Optional[str]) -> Dict[str, str]:
+    """
+    Fill a Google Forms page.
+
+    Google Forms does not use standard <label for="..."> or placeholder
+    attributes the way most HTML forms do -- it uses ARIA roles and
+    aria-labelledby pointing at a separate heading element for the
+    question text. This is why the generic input/textarea matching logic
+    in _fill_form_async returns nothing useful on a Google Form: there is
+    nothing for it to match against.
+
+    Approach: each question on a Google Form is a "listitem" containing
+    a heading (the question text) and one or more form controls
+    (textbox, radio, checkbox, combobox). We iterate listitems, read the
+    question text from the heading, then look for a control inside that
+    same listitem and fill/select it appropriately.
+
+    This is inherently more fragile than filling a standard HTML form --
+    Google can and does change its internal markup without notice. If
+    Google updates their DOM structure, this will need re-tuning; that is
+    a real, ongoing maintenance cost of automating against an
+    unofficial, undocumented structure, not a one-time fix.
+    """
+    filled: Dict[str, str] = {}
+
+    def norm(s: str) -> str:
+        return s.lower().strip() if s else ""
+
+    keyword_map = {
+        "name": profile.get("name"),
+        "full name": profile.get("name"),
+        "first name": profile.get("name"),
+        "last name": profile.get("name"),
+        "email": profile.get("email"),
+        "email address": profile.get("email"),
+        "phone": profile.get("phone"),
+        "phone number": profile.get("phone"),
+        "contact number": profile.get("phone"),
+        "linkedin": profile.get("linkedin"),
+        "linkedin profile": profile.get("linkedin"),
+        "website": profile.get("portfolio"),
+        "portfolio": profile.get("portfolio"),
+        "github": profile.get("github"),
+        "current company": profile.get("current_company"),
+        "current employer": profile.get("current_company"),
+        "current role": profile.get("current_role"),
+        "job title": profile.get("current_role"),
+        "experience": profile.get("experience_years"),
+    }
+
+    # Each Google Forms question renders as role="listitem".
+    questions = page.get_by_role("listitem")
+    question_count = await questions.count()
+
+    for i in range(question_count):
+        question = questions.nth(i)
+
+        # The question text is the first heading inside the listitem.
+        heading = question.get_by_role("heading").first
+        try:
+            question_text = await heading.inner_text(timeout=2000)
+        except Exception:
+            continue
+        field_name = norm(question_text)
+        if not field_name:
+            continue
+
+        # Try a single-line / multi-line text box first (role=textbox
+        # covers both <input> and Google's <textarea>-equivalent).
+        textbox = question.get_by_role("textbox").first
+        if await textbox.count() > 0:
+            is_open_ended = any(
+                k in field_name
+                for k in ["why", "describe", "tell", "motivation", "introduce", "about you", "experience with"]
+            )
+            if is_open_ended:
+                answer = ai_utils.generate_answer(
+                    question=question_text,
+                    resume_text=profile.get("resume_text"),
+                    job_description=job_description,
+                    max_tokens=200,
+                )
+                try:
+                    await textbox.fill(answer, timeout=3000)
+                    filled[field_name] = answer
+                except Exception:
+                    pass
+                continue
+
+            for keyword, value in keyword_map.items():
+                if value and keyword in field_name:
+                    try:
+                        await textbox.fill(value, timeout=3000)
+                        filled[keyword] = value
+                    except Exception:
+                        pass
+                    break
+            continue
+
+        # Radio buttons: pick the option whose own accessible name matches
+        # a known profile value (e.g. work authorization yes/no). This is
+        # best-effort -- it only fires if a profile value happens to match
+        # one of the option labels verbatim, which won't cover every case.
+        radio_group = question.get_by_role("radio")
+        if await radio_group.count() > 0:
+            for keyword, value in keyword_map.items():
+                if value and keyword in field_name:
+                    option = radio_group.filter(has_text=value).first
+                    if await option.count() > 0:
+                        try:
+                            await option.check(timeout=3000)
+                            filled[field_name] = value
+                        except Exception:
+                            pass
+                    break
+            continue
+
+        # File upload questions on Google Forms require the responder to
+        # be signed in and use a native OS file picker dialog, which
+        # Playwright cannot drive the same way as a plain <input
+        # type="file">. We deliberately skip these rather than silently
+        # fail or hang waiting on an OS-level dialog.
+        # (No generic handling here -- flagged in the docstring/README.)
+
+    return filled
+
+
 async def _fill_form_async(url: str,
                            profile: Dict[str, str],
                            resume_path: Optional[Path],
@@ -49,6 +176,15 @@ async def _fill_form_async(url: str,
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.goto(url)
+
+        # Google Forms has a completely different DOM shape (ARIA roles,
+        # no <label>/placeholder), so it gets its own dedicated path
+        # rather than trying to force it through the generic logic below.
+        if "docs.google.com/forms" in url:
+            await page.wait_for_selector('[role="listitem"]', timeout=15000)
+            filled = await _fill_google_form(page, profile, job_description)
+            await browser.close()
+            return filled
 
         # Wait for the form to be visible. We assume there is at least one
         # <input> element on the page. Adjust timeout as needed.
