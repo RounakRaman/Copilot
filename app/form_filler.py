@@ -18,7 +18,6 @@ frameworks.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -169,38 +168,27 @@ async def _fill_form_async(url: str,
         return filled
 
 
-def fill_form(url: str,
-              profile: Dict[str, str],
-              resume_path: Optional[Path] = None,
-              job_description: Optional[str] = None) -> Dict[str, str]:
-    """
-    Public API for form filling.
-
-    Parameters
-    ----------
-    url: str
-        The URL of the job application form to open.
-    profile: Dict[str, str]
-        The candidate's profile fields, typically obtained via the profile API.
-    resume_path: Optional[Path]
-        Path to the resume file to upload if the form supports it.
-    job_description: Optional[str]
-        Text of the job description, used to generate answers for open‑ended
-        questions.
-
-    Returns
-    -------
-    Dict[str, str]
-        A mapping of field identifiers to the values that were inserted.
-    """
-    # Run the async coroutine in an event loop. If an event loop is already
-    # running (e.g. within Jupyter), create a new one to avoid conflicts.
-    try:
-        return asyncio.run(_fill_form_async(url, profile, resume_path, job_description))
-    except RuntimeError:
-        # Handle case where event loop is already running
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_fill_form_async(url, profile, resume_path, job_description))
-        loop.close()
-        return result
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+#
+# NOTE: there used to be a synchronous `fill_form()` wrapper here that
+# tried to manage its own asyncio event loop (asyncio.run(), with a
+# fallback to asyncio.new_event_loop() if a loop was already running).
+# That fallback was broken: loop.run_until_complete() ALSO requires that
+# no loop is currently running on the thread, so calling this from within
+# main.py's `async def autofill_job_application(...)` -- which already
+# runs on uvicorn's event loop -- raised:
+#     RuntimeError: Cannot run the event loop while another loop is running
+#
+# There is no way to "nest" a new event loop on top of a running one in
+# plain asyncio. The actual fix is to not create a second loop at all:
+# since the caller is already async, it should just `await` this
+# coroutine directly. main.py has been updated accordingly to call
+# `await form_filler._fill_form_async(...)` instead of a sync fill_form().
+#
+# _fill_form_async is intentionally the public entry point now. If you
+# ever need a sync (non-async) caller for this module, use
+# `asyncio.run(_fill_form_async(...))` from a plain sync context that is
+# NOT already inside a running event loop -- not from inside FastAPI
+# request handlers.
