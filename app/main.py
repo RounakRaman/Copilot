@@ -32,21 +32,12 @@ from typing import Optional, List
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
-from . import ai_utils, resume_utils, ocr_utils, form_filler
+from . import ai_utils, resume_utils, ocr_utils, form_filler, db
 
-# The location of the profile JSON file.
-#
-# IMPORTANT: this used to live inside the app's source directory
-# (Path(__file__).parent), but Render's deployed code directory is
-# read-only at runtime. Writing there throws an OSError/PermissionError
-# that was uncaught, which is what produced the 500 with no detail.
-#
-# tempfile.gettempdir() is guaranteed writable on Render (and most hosts).
-# Trade-off: this directory is ephemeral -- it can be wiped on restart or
-# redeploy. This is NOT permanent storage. If you need the profile to
-# survive restarts, attach a Render Persistent Disk and point this at a
-# path on that disk instead, or move to a real database.
-PROFILE_PATH = Path(tempfile.gettempdir()) / "copilot_profile.json"
+# Profile storage now lives in Postgres (see db.py) instead of a local
+# file. This is what actually makes "save my profile forever" true --
+# file-based storage on Render is either read-only (source dir) or wiped
+# on restart (/tmp). See db.py for setup instructions (DATABASE_URL).
 
 
 class Profile(BaseModel):
@@ -110,22 +101,38 @@ app = FastAPI(title="AI Job Application Copilot",
 
 
 def load_profile() -> Profile:
-    """Load the user profile from disk or return an empty profile."""
-    if PROFILE_PATH.exists():
-        try:
-            data = json.loads(PROFILE_PATH.read_text())
-            return Profile(**data)
-        except (json.JSONDecodeError, OSError) as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read profile: {e}")
-    return Profile()
+    """Load the user profile from Postgres, or return an empty profile if none saved yet."""
+    try:
+        data = db.load_profile_dict()
+    except Exception as e:
+        # Covers: DATABASE_URL missing, Neon project asleep and failing to
+        # wake within the connection timeout, network errors, bad
+        # credentials -- all surfaced as a real error instead of a bare 500.
+        raise HTTPException(status_code=500, detail=f"Failed to read profile from database: {e}")
+    return Profile(**data) if data else Profile()
 
 
 def save_profile(profile: Profile) -> None:
-    """Persist the profile to disk."""
+    """Persist the profile to Postgres."""
     try:
-        PROFILE_PATH.write_text(profile.json(indent=2))
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write profile: {e}")
+        db.save_profile_dict(json.loads(profile.json()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write profile to database: {e}")
+
+
+@app.on_event("startup")
+def _ensure_db_ready() -> None:
+    """
+    Create the profile table on startup if it doesn't exist yet. If
+    DATABASE_URL isn't configured, log a warning instead of crashing the
+    whole app on boot -- /profile will fail with a clear error when
+    actually called, but /generate-answer and /autofill can still work.
+    """
+    try:
+        db.init_db()
+    except Exception as e:
+        import logging
+        logging.warning("Database not ready at startup (profile storage will fail until fixed): %s", e)
 
 
 @app.get("/profile", response_model=Profile)
