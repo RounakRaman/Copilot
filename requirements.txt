@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 PyPDF2
-easyocr
 requests
 playwright
 pydantic
