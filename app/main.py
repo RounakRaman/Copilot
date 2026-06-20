@@ -25,6 +25,7 @@ product. Feel free to extend it for your own needs.
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional, List
 
@@ -166,6 +167,7 @@ async def generate_answer(request: GenerateAnswerRequest) -> GenerateAnswerRespo
 @app.post("/autofill")
 async def autofill_job_application(url: str = Form(...),
                                    resume_path: Optional[str] = Form(None),
+                                   resume_file: Optional[UploadFile] = File(None),
                                    screenshot: Optional[UploadFile] = File(None)):
     """
     Launch Playwright to open the provided application form URL and attempt to
@@ -173,8 +175,22 @@ async def autofill_job_application(url: str = Form(...),
     accepts a screenshot of the form if the text is not machine‑readable; the
     screenshot is run through OCR to extract the job description.
 
+    Resume can be supplied two ways:
+    * ``resume_path`` -- a path that already exists on the server's disk.
+    * ``resume_file`` -- an actual uploaded PDF, which is saved to a temp
+      path on the server before Playwright uses it. This is the option a
+      separate frontend (e.g. Streamlit running elsewhere) needs, since it
+      cannot pass a server-side file path for a file that lives on a
+      different machine.
+
+    If both are given, ``resume_file`` takes precedence.
+
     The endpoint returns a dictionary summarising what was filled. It does not
     submit the form, leaving the final review and submission to the user.
+
+    Note: Render's free-tier filesystem is ephemeral -- an uploaded resume
+    is written to a temp directory for the duration of this request only
+    and is not guaranteed to persist across deploys or restarts.
     """
     profile = load_profile()
 
@@ -184,9 +200,17 @@ async def autofill_job_application(url: str = Form(...),
         image_bytes = await screenshot.read()
         job_desc_text = ocr_utils.extract_text_from_image_bytes(image_bytes)
 
-    # Determine the resume to upload
+    # Determine the resume to use. An uploaded file takes precedence over
+    # a path string, since the path string only makes sense if the caller
+    # is running on the same machine as this server.
     resume_file_path = None
-    if resume_path:
+    if resume_file:
+        upload_dir = Path(tempfile.gettempdir()) / "copilot_resumes"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        resume_file_path = upload_dir / resume_file.filename
+        contents = await resume_file.read()
+        resume_file_path.write_bytes(contents)
+    elif resume_path:
         resume_file_path = Path(resume_path)
     elif profile.github:
         resume_file_path = Path(profile.github)
